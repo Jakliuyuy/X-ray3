@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+# WireGuard -> Clash 自动转换脚本
+import yaml
+import qrcode
+import sys
+
+# WireGuard 配置路径
+wg_conf = "/root/client.conf"  # 改成你的文件路径
+
+# 读取 WireGuard 配置
+wg = {}
+with open(wg_conf, "r") as f:
+    section = None
+    for line in f:
+        line = line.strip()
+        if line.startswith("[Interface]"):
+            section = "Interface"
+            wg[section] = {}
+        elif line.startswith("[Peer]"):
+            section = "Peer"
+            wg[section] = {}
+        elif line and "=" in line:
+            key, value = line.split("=", 1)
+            wg[section][key.strip()] = value.strip()
+
+# 构建 Clash 节点
+node = {
+    "name": "MyWireGuard",
+    "type": "wireguard",
+    "server": wg["Peer"]["Endpoint"].split(":")[0],
+    "port": int(wg["Peer"]["Endpoint"].split(":")[1]),
+    "private-key": wg["Interface"]["PrivateKey"],
+    "public-key": wg["Peer"]["PublicKey"],
+    "address": wg["Interface"]["Address"].split("/")[0],
+    "peer-address": "10.0.0.1",  # 服务器端 WireGuard 地址，可修改
+    "dns": ["1.1.1.1"],
+    "keepalive": int(wg["Peer"].get("PersistentKeepalive", "25")),
+}
+
+# 构建 Clash YAML
+clash_config = {
+    "proxies": [node],
+    "proxy-groups": [
+        {"name": "Game", "type": "select", "proxies": ["MyWireGuard"]}
+    ],
+    "rules": [
+        # 游戏域名/关键字分流
+        "DOMAIN-SUFFIX,game.com,Game",
+        "DOMAIN-SUFFIX,pubg.com,Game",
+        "DOMAIN-KEYWORD,cod,Game",
+        "MATCH,DIRECT"
+    ]
+}
+
+# 写入 YAML 文件
+yaml_file = "clash.yaml"
+with open(yaml_file, "w") as f:
+    yaml.dump(clash_config, f, sort_keys=False)
+
+print(f"Clash 配置生成完成: {yaml_file}")
+
+# 生成二维码
+with open(yaml_file, "r") as f:
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_Q)
+    qr.add_data(f"clash://import?url=file://{yaml_file}")
+    qr.make()
+    qr.print_ascii(invert=True)
+
+print("扫码即可导入 Clash 使用")
