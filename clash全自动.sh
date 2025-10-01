@@ -3,10 +3,9 @@ set -e
 
 if [ -z "$1" ]; then
   echo "❌ 错误：请传入订阅地址，例如："
-  echo 'bash <(curl -Ls https://raw.githubusercontent.com/liu-auto/clash-debian12/main/clash-sub.sh) "http://example.com/sub.yaml"'
+  echo 'bash <(curl -Ls https://raw.githubusercontent.com/Jakliuyuy/X-ray3/main/clash自动.sh) "http://example.com/sub.yaml"'
   exit 1
 fi
-
 SUB_URL="$1"
 
 echo "[+] 更新系统..."
@@ -34,25 +33,28 @@ echo "[+] 下载订阅配置..."
 curl -L -o $CLASH_DIR/config.yaml "$SUB_URL"
 
 # 写入 systemd 服务
-cat > $CLASH_SERVICE <<EOT
+cat > $CLASH_SERVICE <<EOF
 [Unit]
 Description=Clash Proxy
 After=network.target
+
 [Service]
 ExecStart=$CLASH_BIN -d $CLASH_DIR
 Restart=always
 RestartSec=5
 LimitNOFILE=4096
+
 [Install]
 WantedBy=multi-user.target
-EOT
+EOF
 
 # 启动并设置开机自启
 systemctl daemon-reexec
 systemctl enable clash
 systemctl restart clash
 
-# 启动 http server 暴露订阅
+# 启动 HTTP 服务暴露订阅
+# 杀掉端口 9090 的旧进程（如果有）
 kill -9 $(lsof -t -i:9090) 2>/dev/null || true
 cd $CLASH_DIR
 nohup python3 -m http.server 9090 >/dev/null 2>&1 &
