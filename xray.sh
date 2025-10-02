@@ -148,24 +148,37 @@ fi
 # certificate functions
 CERT_DIR=""
 issue_cert_cloudflare(){
+  # 确保邮箱不为空
+  while [ -z "$CF_EMAIL" ]; do
+    read -rp "请输入你的邮箱（用于 acme.sh 注册 Let’s Encrypt 账户）： " CF_EMAIL
+  done
+
+  # 注册账户并指定 CA 为 Let’s Encrypt
+  info "注册 acme.sh 账户并使用 Let’s Encrypt..."
+  ~/.acme.sh/acme.sh --register-account -m "$CF_EMAIL" --server letsencrypt
+
+  # 设置 Cloudflare API Token
   export CF_Token="$CF_TOKEN"
-  [ -n "$CF_EMAIL" ] && export CF_Email="$CF_EMAIL"
+  export CF_Email="$CF_EMAIL"
+
   info "使用 Cloudflare DNS 模式申请证书..."
-  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --keylength ec-256 || ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" || true
+  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --yes-I-know-dns-manual-mode >/dev/null 2>&1 || \
+  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" || true
+
+  # 检查证书目录
   if [ -d "$HOME/.acme.sh/${DOMAIN}_ecc" ]; then
     CERT_DIR="$HOME/.acme.sh/${DOMAIN}_ecc"
-  elif [ -d "$HOME/.acme.sh/$DOMAIN" ]; then
-    CERT_DIR="$HOME/.acme.sh/$DOMAIN"
   else
-    err "证书目录未找到"; exit 1
+    CERT_DIR="$HOME/.acme.sh/$DOMAIN"
   fi
+
+  # 安装证书
   mkdir -p /etc/ssl/xray
   ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
     --ecc \
     --key-file /etc/ssl/xray/xray.key \
     --fullchain-file /etc/ssl/xray/xray.crt \
-    --reloadcmd "systemctl restart xray 2>/dev/null || true"
-  ok "证书安装完成"
+    --reloadcmd "systemctl restart xray 2>/dev/null || true" || true
 }
 
 issue_cert_webroot(){
