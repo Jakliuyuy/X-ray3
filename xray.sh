@@ -5,7 +5,7 @@ set -e
 # Xray 一键安装脚本 (Debian 12)
 # =============================
 
-DOMAIN="clash.liuyuy.xyz"   # ← 这里换成你解析到服务器IP的域名
+DOMAIN="xray.liuyuy.xyz"   # ← 这里换成你解析到服务器IP的域名
 PORT=443
 UUID=$(cat /proc/sys/kernel/random/uuid)
 XRAY_DIR="/etc/xray"
