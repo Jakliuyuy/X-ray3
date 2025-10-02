@@ -1,68 +1,110 @@
 #!/bin/bash
 set -e
 
-if [ -z "$1" ]; then
-  echo "❌ 错误：请传入订阅地址，例如："
-  echo 'bash <(curl -Ls https://raw.githubusercontent.com/Jakliuyuy/X-ray3/main/clash自动.sh) "http://example.com/sub.yaml"'
-  exit 1
-fi
-SUB_URL="$1"
+# =============================
+# Xray 一键安装脚本 (Debian 12)
+# =============================
+
+DOMAIN="你的域名"   # ← 这里换成你解析到服务器IP的域名
+PORT=443
+UUID=$(cat /proc/sys/kernel/random/uuid)
+XRAY_DIR="/etc/xray"
+CLASH_DIR="/etc/clash"
 
 echo "[+] 更新系统..."
 apt update -y && apt upgrade -y
-apt install -y wget curl tar python3 lsof
+apt install -y curl wget unzip socat net-tools
 
-CLASH_DIR="/etc/clash"
-CLASH_BIN="/usr/local/bin/clash"
-CLASH_URL="https://github.com/Dreamacro/clash/releases/latest/download/clash-linux-amd64-v3"
-CLASH_SERVICE="/etc/systemd/system/clash.service"
+echo "[+] 安装 acme.sh 申请证书..."
+curl https://get.acme.sh | sh
+~/.acme.sh/acme.sh --issue -d $DOMAIN --standalone --keylength ec-256
+mkdir -p /etc/ssl/xray
+~/.acme.sh/acme.sh --install-cert -d $DOMAIN \
+  --ecc \
+  --key-file       /etc/ssl/xray/xray.key \
+  --fullchain-file /etc/ssl/xray/xray.crt
 
-# 创建目录
-mkdir -p $CLASH_DIR
-cd $CLASH_DIR
+echo "[+] 安装 Xray..."
+bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
 
-# 下载 Clash 内核
-if [ ! -f "$CLASH_BIN" ]; then
-    echo "[+] 下载 Clash 核心..."
-    wget -O $CLASH_BIN $CLASH_URL
-    chmod +x $CLASH_BIN
-fi
+mkdir -p $XRAY_DIR
 
-# 拉取订阅配置
-echo "[+] 下载订阅配置..."
-curl -L -o $CLASH_DIR/config.yaml "$SUB_URL"
-
-# 写入 systemd 服务
-cat > $CLASH_SERVICE <<EOF
-[Unit]
-Description=Clash Proxy
-After=network.target
-
-[Service]
-ExecStart=$CLASH_BIN -d $CLASH_DIR
-Restart=always
-RestartSec=5
-LimitNOFILE=4096
-
-[Install]
-WantedBy=multi-user.target
+cat > $XRAY_DIR/config.json <<EOF
+{
+  "inbounds": [{
+    "port": $PORT,
+    "protocol": "vless",
+    "settings": {
+      "clients": [{ "id": "$UUID", "level": 0 }]
+    },
+    "streamSettings": {
+      "network": "ws",
+      "security": "tls",
+      "tlsSettings": {
+        "certificates": [{
+          "certificateFile": "/etc/ssl/xray/xray.crt",
+          "keyFile": "/etc/ssl/xray/xray.key"
+        }]
+      },
+      "wsSettings": { "path": "/websocket" }
+    }
+  }],
+  "outbounds": [{ "protocol": "freedom" }]
+}
 EOF
 
-# 启动并设置开机自启
-systemctl daemon-reexec
-systemctl enable clash
-systemctl restart clash
+systemctl enable xray
+systemctl restart xray
 
-# 启动 HTTP 服务暴露订阅
-# 杀掉端口 9090 的旧进程（如果有）
+echo "[+] 生成 Clash 配置..."
+mkdir -p $CLASH_DIR
+cat > $CLASH_DIR/config.yaml <<EOF
+port: 7890
+socks-port: 7891
+allow-lan: true
+mode: Rule
+log-level: info
+
+proxies:
+  - name: "MyServer"
+    type: vless
+    server: $DOMAIN
+    port: $PORT
+    uuid: $UUID
+    network: ws
+    tls: true
+    udp: true
+    ws-opts:
+      path: /websocket
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - MyServer
+
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+EOF
+
+echo "[+] 提供订阅链接..."
 kill -9 $(lsof -t -i:9090) 2>/dev/null || true
-cd $CLASH_DIR
-nohup python3 -m http.server 9090 >/dev/null 2>&1 &
+nohup python3 -m http.server 9090 --directory $CLASH_DIR >/dev/null 2>&1 &
 
-# 输出订阅地址
 IP=$(curl -s ipv4.icanhazip.com || curl -s ifconfig.me)
+
 echo "===================================="
-echo "Clash 安装完成 ✅"
-echo "订阅文件已使用: $SUB_URL"
-echo "客户端订阅链接: http://$IP:9090/config.yaml"
+echo "✅ Xray 安装完成！"
+echo "服务器节点信息："
+echo "协议: VLESS"
+echo "域名: $DOMAIN"
+echo "端口: $PORT"
+echo "UUID: $UUID"
+echo "传输: WS"
+echo "路径: /websocket"
+echo "TLS : 启用"
+echo
+echo "Clash 客户端订阅地址："
+echo "http://$IP:9090/config.yaml"
 echo "===================================="
