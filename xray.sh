@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===========================================
 # xray_auto_menu.sh
-# 一键智能安装 Xray + Clash 配置
-# Cloudflare DNS 支持代理/直连选择
-# 支持 Linux 主流系统
-# ===========================================
+# 一键智能安装 Xray + 生成 Clash config
+# 支持 Cloudflare 代理 / DNS-only / Webroot / Standalone / 自签 / 无 TLS
 
+# ---------- helpers ----------
 info(){ echo -e "\e[1;34m[INFO]\e[0m $*"; }
 ok(){ echo -e "\e[1;32m[OK]\e[0m $*"; }
 warn(){ echo -e "\e[1;33m[WARN]\e[0m $*"; }
 err(){ echo -e "\e[1;31m[ERR]\e[0m $*"; }
+pause(){ read -rp "$*"; }
 
 # ensure root
 if [ "$EUID" -ne 0 ]; then
@@ -19,7 +18,7 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# detect OS
+# detect os family & package manager
 PKG_INSTALL=""
 UPDATE_CMD=""
 OS_FAMILY=""
@@ -37,7 +36,7 @@ elif [ -f /etc/redhat-release ] || [ -f /etc/centos-release ]; then
     UPDATE_CMD="yum makecache -y"
   fi
 else
-  warn "未识别系统，仅尝试安装常用工具"
+  warn "未识别系统，只尝试安装常见工具，可能存在兼容问题。"
   PKG_INSTALL="apt -y install || yum -y install"
   UPDATE_CMD="true"
 fi
@@ -53,19 +52,19 @@ else
     $PKG_INSTALL libidn || true
   fi
 fi
-ok "依赖安装完成"
+ok "依赖安装/检查完成"
 
-# get public IP
+# get public ip
 PUB_IP=$(curl -s https://ipv4.icanhazip.com || curl -s https://ifconfig.me || true)
 PUB_IP="${PUB_IP// /}"
 
-# menu
+# ---------- menu ----------
 echo
 info "请选择证书 / 域名 方案："
 cat <<'MENU'
-1) 有域名 + Cloudflare DNS（推荐）
-2) 有域名 + Webroot（已有网站）
-3) 有域名 + Standalone（临时停止 80 端口）
+1) 有域名 + Cloudflare DNS
+2) 有域名 + Webroot
+3) 有域名 + Standalone
 4) 无域名 + 自签名证书
 5) 无域名 + 无 TLS
 MENU
@@ -74,16 +73,15 @@ read -rp "输入选项 [1-5]（默认1）: " CHOICE
 CHOICE=${CHOICE:-1}
 
 # common variables
-read -rp "请输入节点备注名称（默认 MyServer）: " NODE_NAME
+read -rp "请输入备注名称（用于生成节点名，默认 MyServer）: " NODE_NAME
 NODE_NAME=${NODE_NAME:-MyServer}
 
-# handle choices
 DOMAIN=""
 CF_TOKEN=""
 CF_EMAIL=""
 WEBROOT=""
 STOP_SERVICE_CMD=""
-CF_PROXY_MODE=""
+CF_MODE=1  # 默认走代理
 
 if [ "$CHOICE" -eq 1 ]; then
   while [ -z "$DOMAIN" ]; do
@@ -93,23 +91,19 @@ if [ "$CHOICE" -eq 1 ]; then
     echo "请准备 Cloudflare API Token（Zone.DNS Edit 权限）"
     read -rp "请输入 Cloudflare API Token： " CF_TOKEN
   done
-  read -rp "（可选）Cloudflare 账户邮箱： " CF_EMAIL
-
+  read -rp "请输入 Cloudflare 邮箱（可留空）： " CF_EMAIL
+  # 选择 Cloudflare 代理模式
   echo
   echo "请选择 Cloudflare 代理模式："
   echo "1) 走 Cloudflare 代理（橙云，隐藏真实 IP）"
   echo "2) 不走 Cloudflare 代理（DNS-only，直连服务器）"
-  read -rp "输入选项 [1-2]（默认1）: " CF_PROXY_CHOICE
-  CF_PROXY_CHOICE=${CF_PROXY_CHOICE:-1}
-
-  if [ "$CF_PROXY_CHOICE" -eq 1 ]; then
-    CF_PROXY_MODE="proxied"
+  read -rp "输入选项 [1-2]（默认1）: " CF_MODE
+  CF_MODE=${CF_MODE:-1}
+  if [ "$CF_MODE" -eq 1 ]; then
     warn "已选择走 Cloudflare 代理（橙云）"
   else
-    CF_PROXY_MODE="dns_only"
-    warn "已选择不走 Cloudflare 代理（直连模式）"
+    warn "已选择 DNS-only（直连服务器）"
   fi
-
 elif [ "$CHOICE" -eq 2 ]; then
   while [ -z "$DOMAIN" ]; do
     read -rp "请输入你的域名（例如 sub.example.com）： " DOMAIN
@@ -117,25 +111,22 @@ elif [ "$CHOICE" -eq 2 ]; then
   while [ -z "$WEBROOT" ]; do
     read -rp "请输入 webroot 路径（例如 /var/www/html）： " WEBROOT
   done
-
 elif [ "$CHOICE" -eq 3 ]; then
   while [ -z "$DOMAIN" ]; do
     read -rp "请输入你的域名（例如 sub.example.com）： " DOMAIN
   done
-  warn "Standalone 模式会临时停止 80 端口占用程序"
+  warn "Standalone 模式会临时停止 80 端口占用程序（例如 nginx）"
   read -rp "如需停止 nginx，请输入 nginx，否则留空： " STOP_SERVICE_CMD
-
 elif [ "$CHOICE" -eq 4 ]; then
-  warn "使用自签名证书，客户端需手动信任证书"
-
+  warn "使用自签名证书，客户端需要手动信任证书"
 elif [ "$CHOICE" -eq 5 ]; then
-  warn "无 TLS 模式，仅用于测试/内网"
+  warn "无 TLS 模式，通信不加密，仅用于测试/内网"
 else
   err "无效选项"; exit 1
 fi
 
-# install acme.sh if needed
-if [[ "$CHOICE" =~ ^[1-4]$ ]]; then
+# ---------- install acme.sh ----------
+if [[ "$CHOICE" =~ [1-4] ]]; then
   if [ ! -d "$HOME/.acme.sh" ]; then
     info "安装 acme.sh..."
     curl -sS https://get.acme.sh | bash
@@ -145,32 +136,16 @@ if [[ "$CHOICE" =~ ^[1-4]$ ]]; then
   export PATH="$HOME/.acme.sh:$PATH"
 fi
 
-# certificate functions
+# ---------- certificate ----------
 CERT_DIR=""
 issue_cert_cloudflare(){
-  # 确保邮箱不为空
-  while [ -z "$CF_EMAIL" ]; do
-    read -rp "请输入你的邮箱（用于 acme.sh 注册 Let’s Encrypt 账户）： " CF_EMAIL
-  done
-
-  # 注册账户并指定 CA 为 Let’s Encrypt
-  info "注册 acme.sh 账户并使用 Let’s Encrypt..."
-  ~/.acme.sh/acme.sh --register-account -m "$CF_EMAIL" --server letsencrypt
-
-  # 设置 Cloudflare API Token
   export CF_Token="$CF_TOKEN"
-  export CF_Email="$CF_EMAIL"
+  [ -n "$CF_EMAIL" ] && export CF_Email="$CF_EMAIL"
+  info "注册 acme.sh 账户并使用 Let’s Encrypt..."
+  ~/.acme.sh/acme.sh --register-account -m "${CF_EMAIL:-example@domain.com}" --server letsencrypt
 
   info "使用 Cloudflare DNS 模式申请证书..."
-  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --yes-I-know-dns-manual-mode >/dev/null 2>&1 || \
-  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" || true
-
-  # 检查证书目录
-  if [ -d "$HOME/.acme.sh/${DOMAIN}_ecc" ]; then
-    CERT_DIR="$HOME/.acme.sh/${DOMAIN}_ecc"
-  else
-    CERT_DIR="$HOME/.acme.sh/$DOMAIN"
-  fi
+  ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --server letsencrypt --keylength ec-256 || true
 
   # 安装证书
   mkdir -p /etc/ssl/xray
@@ -178,21 +153,12 @@ issue_cert_cloudflare(){
     --ecc \
     --key-file /etc/ssl/xray/xray.key \
     --fullchain-file /etc/ssl/xray/xray.crt \
-    --reloadcmd "systemctl restart xray 2>/dev/null || true" || true
+    --reloadcmd "systemctl restart xray 2>/dev/null || true"
 }
 
 issue_cert_webroot(){
-  if [ ! -d "$WEBROOT" ]; then
-    err "webroot 目录不存在：$WEBROOT"
-    exit 1
-  fi
-  info "使用 webroot 模式申请证书..."
-  ~/.acme.sh/acme.sh --issue -d "$DOMAIN" -w "$WEBROOT" --keylength ec-256 || true
-  if [ -d "$HOME/.acme.sh/${DOMAIN}_ecc" ]; then
-    CERT_DIR="$HOME/.acme.sh/${DOMAIN}_ecc"
-  else
-    CERT_DIR="$HOME/.acme.sh/$DOMAIN"
-  fi
+  info "使用 Webroot 模式申请证书..."
+  ~/.acme.sh/acme.sh --issue -d "$DOMAIN" -w "$WEBROOT" --server letsencrypt || true
   mkdir -p /etc/ssl/xray
   ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
     --ecc \
@@ -202,16 +168,11 @@ issue_cert_webroot(){
 }
 
 issue_cert_standalone(){
-  info "使用 standalone 模式申请证书..."
+  info "使用 Standalone 模式申请证书..."
   if [ -n "$STOP_SERVICE_CMD" ]; then
     systemctl stop "$STOP_SERVICE_CMD" || true
   fi
-  ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --keylength ec-256 || true
-  if [ -d "$HOME/.acme.sh/${DOMAIN}_ecc" ]; then
-    CERT_DIR="$HOME/.acme.sh/${DOMAIN}_ecc"
-  else
-    CERT_DIR="$HOME/.acme.sh/$DOMAIN"
-  fi
+  ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --server letsencrypt || true
   mkdir -p /etc/ssl/xray
   ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
     --ecc \
@@ -224,41 +185,45 @@ issue_cert_standalone(){
 }
 
 create_self_signed(){
-  info "生成自签名证书..."
+  info "生成自签名证书到 /etc/ssl/xray/"
   mkdir -p /etc/ssl/xray
   openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
     -keyout /etc/ssl/xray/xray.key -out /etc/ssl/xray/xray.crt \
     -subj "/CN=${DOMAIN:-$PUB_IP}"
 }
 
-# issue cert
 case $CHOICE in
   1) issue_cert_cloudflare ;;
   2) issue_cert_webroot ;;
   3) issue_cert_standalone ;;
   4) create_self_signed ;;
-  5) warn "无 TLS 模式，跳过证书生成" ;;
+  5) warn "无 TLS，跳过证书生成" ;;
 esac
 
-# verify cert
+# ---------- verify cert ----------
 if [ "$CHOICE" -ne 5 ] && [ ! -f /etc/ssl/xray/xray.crt ]; then
-  err "证书未生成"; exit 1
+  err "证书未生成，请检查 acme.sh 日志或 Cloudflare Token 权限"
+  exit 1
 fi
 
-# install Xray
+# ---------- install Xray ----------
 info "安装 Xray-core..."
 bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install >/dev/null 2>&1 || true
+if ! command -v xray >/dev/null 2>&1; then
+  err "Xray 安装失败，请手动检查"
+  exit 1
+fi
 ok "Xray 安装完成"
 
-# generate Xray config
+# ---------- generate Xray config ----------
 XRAY_DIR="/etc/xray"
 mkdir -p "$XRAY_DIR"
 UUID="$(cat /proc/sys/kernel/random/uuid)"
-XRAY_PORT=$([ "$CHOICE" -eq 5 ] && echo 12345 || echo 443)
-TLS_ENABLED=$([ "$CHOICE" -eq 5 ] && echo false || echo true)
+XRAY_PORT=$(( CHOICE==5 ? 12345 : 443 ))
+TLS_ENABLED=$(( CHOICE!=5 ? 1 : 0 ))
 WS_PATH="/websocket"
 
-info "生成 Xray 配置..."
+info "生成 Xray 配置 (VLESS+WS ${TLS_ENABLED:+with TLS}) ..."
 cat > "$XRAY_DIR/config.json" <<JSON
 {
   "log": {"loglevel":"warning"},
@@ -266,47 +231,48 @@ cat > "$XRAY_DIR/config.json" <<JSON
     {
       "port": $XRAY_PORT,
       "protocol": "vless",
-      "settings": {
-        "clients": [{"id":"$UUID","flow":""}],
-        "decryption":"none"
-      },
+      "settings": { "clients": [{ "id": "$UUID", "flow": "" }], "decryption": "none" },
       "streamSettings": {
-        "network":"ws",
-        "wsSettings":{"path":"$WS_PATH","headers":{"Host":"${DOMAIN:-$PUB_IP}"}}$([ "$TLS_ENABLED" = true ] && cat <<'TLSBLOCK'
+        "network": "ws",
+        "wsSettings": { "path": "$WS_PATH", "headers": { "Host": "${DOMAIN:-$PUB_IP}" } }$([ "$TLS_ENABLED" -eq 1 ] && cat <<'TLSBLOCK'
 ,
-        "security":"tls",
-        "tlsSettings":{
-          "certificates":[{"certificateFile":"/etc/ssl/xray/xray.crt","keyFile":"/etc/ssl/xray/xray.key"}]
-        }
+        "security": "tls",
+        "tlsSettings": { "certificates": [{ "certificateFile": "/etc/ssl/xray/xray.crt", "keyFile": "/etc/ssl/xray/xray.key" }] }
 TLSBLOCK
 )
       }
     }
   ],
-  "outbounds":[{"protocol":"freedom","settings":{}}]
+  "outbounds": [ { "protocol": "freedom", "settings": {} } ]
 }
 JSON
 
 chmod 600 "$XRAY_DIR/config.json"
+chown -R root:root "$XRAY_DIR"
 
-# systemd start
-info "启用并启动 xray..."
-systemctl daemon-reload
+# ---------- start Xray ----------
+info "启用并启动 xray 服务..."
+systemctl daemon-reload || true
 systemctl enable xray >/dev/null 2>&1 || true
 systemctl restart xray
 sleep 2
-if systemctl is-active --quiet xray; then ok "xray 已启动"; else err "xray 未启动"; exit 1; fi
+if systemctl is-active --quiet xray; then
+  ok "xray 已启动"
+else
+  err "xray 未能启动，请查看日志"
+  journalctl -u xray --no-pager -n 200 || true
+  exit 1
+fi
 
-# generate Clash config
+# ---------- generate Clash config ----------
+info "生成 Clash 配置到 /etc/clash/config.yaml ..."
 CLASH_DIR="/etc/clash"
 mkdir -p "$CLASH_DIR"
-
 WS_PATH_ESCAPED=$(python3 - <<PY
 import urllib.parse
 print(urllib.parse.quote('$WS_PATH', safe=''))
 PY)
-
-SERVER_HOST=$([ "$TLS_ENABLED" = true ] && echo "$DOMAIN" || echo "$PUB_IP")
+SERVER_HOST="${DOMAIN:-$PUB_IP}"
 
 cat > "$CLASH_DIR/config.yaml" <<YAML
 port: 7890
@@ -329,7 +295,7 @@ proxies:
     ws-opts:
       path: $WS_PATH
       headers:
-        Host: ${DOMAIN:-$SERVER_HOST}
+        Host: $SERVER_HOST
 
 proxy-groups:
   - name: "Proxy"
@@ -351,7 +317,7 @@ YAML
 
 chmod 644 "$CLASH_DIR/config.yaml"
 
-# expose HTTP 9090
+# ---------- expose config via HTTP ----------
 info "启动本地 HTTP 服务 (9090) 暴露 Clash 配置..."
 if command -v lsof >/dev/null 2>&1; then
   OLDPID=$(lsof -t -i:9090 || true)
@@ -359,10 +325,32 @@ if command -v lsof >/dev/null 2>&1; then
 fi
 nohup python3 -m http.server 9090 --directory "$CLASH_DIR" >/dev/null 2>&1 &
 
-ok "完成！"
-echo "Xray 配置: /etc/xray/config.json"
-echo "Clash 配置: /etc/clash/config.yaml"
-echo "Clash 订阅: http://$PUB_IP:9090/config.yaml"
+# ---------- display info ----------
+PUBLIC_DISPLAY="${DOMAIN:-$PUB_IP}"
+ok "完成！关键信息："
+echo "========================================"
+if [ "$TLS_ENABLED" -eq 1 ]; then
+  echo "协议: VLESS+WS+TLS"
+  echo "域名/服务器: $PUBLIC_DISPLAY"
+  echo "端口: $XRAY_PORT"
+else
+  echo "协议: VLESS+WS (无 TLS)"
+  echo "服务器: $PUBLIC_DISPLAY"
+  echo "端口: $XRAY_PORT"
+fi
 echo "UUID: $UUID"
 echo "ws path: $WS_PATH"
-echo "端口: $XRAY_PORT"
+echo
+echo "Clash 订阅:"
+echo "http://$PUBLIC_DISPLAY:9090/config.yaml"
+echo
+echo "手动节点 URI 示例:"
+if [ "$TLS_ENABLED" -eq 1 ]; then
+  echo "vless://$UUID@$PUBLIC_DISPLAY:$XRAY_PORT?type=ws&security=tls&path=$WS_PATH_ESCAPED&host=$PUBLIC_DISPLAY#$NODE_NAME"
+else
+  echo "vless://$UUID@$PUBLIC_DISPLAY:$XRAY_PORT?type=ws&security=none&path=$WS_PATH_ESCAPED&host=$PUBLIC_DISPLAY#$NODE_NAME"
+fi
+echo "Xray 配置文件: /etc/xray/config.json"
+echo "Clash 配置文件: /etc/clash/config.yaml"
+echo "查看 Xray 日志: journalctl -u xray -f"
+echo "========================================"
